@@ -63,6 +63,7 @@ __all__ = ['OpenerError',
            'TempOpener',
            'S3Opener',
            'AgileOpener',
+           'LAMAOpener',
            'TahoeOpener',
            'DavOpener',
            'HTTPOpener']
@@ -601,6 +602,22 @@ class AgileOpener(Opener):
         else:
             return agilefs, '/'
 
+class LAMAOpener(Opener):
+    names = ['lama']
+    desc = """Opens a filesystem stored on Agile Cloud storage"""
+    @classmethod
+    def get_fs(cls, registry, fs_name, fs_name_params, fs_path, writeable, create_dir):
+        from fs.lamafs import LAMAFS
+        # fs_path, resourcename = pathsplit(fs_path)
+
+        lamafs = LAMAFS('https://api.lama.lldns.net','wylie','Lime4545!')
+        lamafs.cache_hint(True)
+
+        if fs_path:
+            return lamafs, '/'+fs_path
+        else:
+            return lamafs, '/'
+
 class TahoeOpener(Opener):
     names = ['tahoe']
     desc = """Opens a Tahoe-LAFS filesystem
@@ -865,6 +882,7 @@ opener = OpenerRegistry([OSFSOpener,
                          TempOpener,
                          S3Opener,
                          AgileOpener,
+                         LAMAOpener,
                          TahoeOpener,
                          DavOpener,
                          HTTPOpener,

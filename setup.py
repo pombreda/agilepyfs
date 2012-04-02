@@ -7,7 +7,7 @@ from setuptools import setup
 import sys
 PY3 = sys.version_info >= (3,)
 
-VERSION = "0.4.1"
+VERSION = "0.4.1w"
 
 COMMANDS = ['fscat',
             'fscp',

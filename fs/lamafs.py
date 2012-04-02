@@ -2,15 +2,28 @@
 pyfilesystem module for agile
 
 """
-# DEBUG = False
+DEBUG = True
 
-from cStringIO import StringIO
-import os, sys, stat, logging, socket
-import urlparse, urllib, urllib2, httplib, mimetypes
-import cStringIO, datetime, tempfile, time, pycurl, traceback
+import os, sys, stat, logging
+import urlparse
+import datetime, time
 from functools import wraps
 
 from ConfigParser import SafeConfigParser
+
+from jsonrpc import ServiceProxy, JSONRPCException
+
+# from fs.base import FS
+# from fs.path import normpath
+# from fs.errors import ResourceNotFoundError, ResourceInvalidError, UnsupportedError
+# from fs.remote import RemoteFileBuffer, CacheFS
+# from fs.opener import Opener
+
+from fs.base import *
+from fs.path import *
+from fs.errors import *
+from fs.remote import *
+from fs.filelike import LimitBytesFile
 
 CFG = SafeConfigParser()
 sysconf = os.path.join('/etc/agile/pyfs.ini')
@@ -27,28 +40,11 @@ else:
 	userconfdir = None
 CFG.read(cfgfiles)
 
-from urllib import urlencode
-from jsonrpc import ServiceProxy, JSONRPCException
-
-from agilepyfs.poster.encode import multipart_encode
-
-from fs.base import FS
-from fs.path import normpath
-from fs.errors import ResourceNotFoundError, ResourceInvalidError, UnsupportedError
-from fs.remote import RemoteFileBuffer, CacheFS
-from fs.opener import Opener
-
-from fs.base import *
-from fs.path import *
-from fs.errors import *
-from fs.remote import *
-from fs.filelike import LimitBytesFile
 
 
 FTYPE_DIR = 1
 FTYPE_FILE = 2
 
-"""
 if DEBUG:
 	logger = logging.getLogger()
 	logformat = "[%(process)d] %(levelname)s %(name)s:%(lineno)d %(message)s"
@@ -59,7 +55,6 @@ if DEBUG:
 	logger.addHandler(stderr_handler)
 
 	logger.setLevel(logging.DEBUG)
-"""
 
 def FuncLog(name):
 	def wrapper(func):
@@ -81,295 +76,7 @@ def FuncLog(name):
 	return wrapper
 
 
-class LamaFilesystem(Opener):
-	
-	names = [ 'agilefs', 'lamafs', 'lama' ]
-	desc = "agile API"
-
-	@classmethod
-	def get_fs(cls, registry, fs_name, fs_name_params, fs_path, writeable, create_dir):
-
-		apicfg = dict(CFG.items('api'))
-		base_url = apicfg['url']
-		username = apicfg.get('username')
-		password = apicfg.get('password')
-		caching = boolval(apicfg.get('caching', 'no'))
-
-		if caching:
-			fs = CacheFS(FS(base_url, username, password))
-		else:
-			fs = FS(base_url, username, password)
-			
-		return fs, None
-
-class FileReader(object):
-
-	def __init__(self, g):
-		self.log = logging.getLogger(self.__class__.__name__)
-		self.g = g
-		self.buf = ''
-		# self.log.debug("initialized %s" % (g))
-
-	#@FuncLog(None)
-	def read(self, n):
-		ret = self.buf
-
-		while True:
-			try:
-				self.buf += self.g.next()
-			except StopIteration:
-				# self.log.debug("read loop finished")
-				break
-			if len(self.buf) > n:
-				break
-
-		ret = self.buf[:n]
-		self.buf = self.buf[n:]
-
-		return ret
-
-	def __call__(self, n):
-		return self.read(n)
-
-class LamaFile(object):
-
-	noisy = True
-
-	def __init__(self, fs, path, mode):
-		self.log = logging.getLogger(self.__class__.__name__)
-		self.fs = fs
-		self.egress_url = fs.egress_url
-		self.api = fs.api
-		self._api = fs._api
-		self.path = normpath(path)
-		self.mode = mode
-		self.closed = False
-		self.file_size = None
-		if 'r' in mode or 'a' in mode:
-			self.file_size = fs.getsize(path)
-
-		# self.log.debug("File %s, mode %s" % (path, mode))
-
-		tmpdir = '/tmp/agile'
-		if not os.path.exists(tmpdir):
-			os.makedirs(tmpdir)
-
-		if 'w' in mode or 'r+' in mode:
-			self.tf = tempfile.NamedTemporaryFile(dir=tmpdir)
-			# Useful only for streaming uploads (Not implemented yet)
-			self.fd = 0 # self._start_upload(path, path)
-		else:
-			self.tf = None
-			self.fd = None
-
-		
-	def __str__(self):
-		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, self.tf.name)
-
-	def __repr__(self):
-
-		if self.tf:
-			name = self.tf
-		else:
-			name = None
-
-		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, name)
-
-	def _start_upload(self, src, dst):
-		directory = os.path.dirname(normpath('/'+dst))
-		basename = os.path.basename(normpath('/'+dst))
-
-		api = self.fs.api
-		post_url = self.fs.post_url
-		rfd, wfd = os.pipe()
-		pid = os.fork()
-
-		# self.log.debug("pipe read %d, write %d" % (rfd, wfd))
-
-		if pid == 0:
-			# self.log.info("Stared upload %s to %s, reading from %d" % (src, post_url, rfd))
-
-			try:
-				fp = os.fdopen(rfd)
-				datagen, request_headers = multipart_encode(dict([
-				   ('uploadFile', fp),
-				   ('directory', directory),
-				   ('basename', basename)
-				]))
-				os.close(wfd)
-				ch = pycurl.Curl()
-				ch.setopt(ch.POST, 1)
-				response_headers = []
-				headers = []
-				headers.append("X-LLNW-Authorization: %s" % (str(api.token)))
-				for k, v in request_headers.iteritems():
-					headers.append("%s: %s" % (k, v))
-				ch.setopt(ch.FORBID_REUSE, 1)
-				if self.noisy:
-					#ch.setopt(ch.VERBOSE, 1)
-					pass
-				ch.setopt(ch.HTTPHEADER, headers)
-				ch.setopt(ch.READFUNCTION, FileReader(datagen))
-				ch.setopt(ch.HEADERFUNCTION, response_headers.append)
-				ch.setopt(ch.URL, post_url)
-
-				# self.log.info("directory %s, basename %s" % (directory, basename))
-
-				ch.setopt(ch.SSL_VERIFYPEER, 0)
-				ch.setopt(ch.SSL_VERIFYHOST, 0)
-
-				# self.log.info("Writing to pipe %d" % (rfd))
-				ch.perform()
-
-			except Exception, e:
-				traceback.print_exc()
-				self.log.error("%s" % (e))
-
-			# self.log.debug("close %d" % (rfd))
-			os.close(rfd)
-			#sys.exit(0)
-			# self.log.debug("finished")
-			
-		else:
-			# self.log.info("upload child pid %s" % (pid))
-			os.close(rfd)
-			return wfd
-
-	#@FuncLog(None)
-	def setcontents(self, path, contents, chunk_size=64*1024):
-		contents.seek(0)
-		data = contents.read(chunk_size)
-		while data:
-			tf.write(data)
-			data = contents.read(chunk_size)
-
-		rc = upload_file(self.post_url, self.api.token, tf.name, path)
-
-
-	#@FuncLog(None)
-	def write(self, data):
-		self.tf.write(data)
-
-	#@FuncLog(None)
-	def read(self, n):
-		if self.tf:
-			return self.tf.read(n)
-
-		# Read from mapper
-		if not hasattr(self, 'urlf'):
-			egress_url = "%s%s" % (self.egress_url, self.path)
-			# self.log.info("Egress URL %s" % (egress_url))
-			urlf = urllib.urlopen(egress_url)
-			self.urlf = urlf
-
-		return self.urlf.read(n)
-
-	#@FuncLog(None)
-	def flush(self):
-		# self.log.info("flush %s" % (self.path))
-		pass
-
-	#@FuncLog(None)
-	def seek(self, offset, whence=0):
-		return None
-
-	#@FuncLog(None)
-	def close(self):
-		self.closed = True		
-		if self.fd:
-			os.close(self.fd)
-
-		token = self.api._get_token()
-
-		if token == None:
-			self.api.noop()
-			token = self.fs.api._get_token()
-
-		if token == None:
-			# TODO: Why doesn't the former work? ... some reference hell?
-			# Force a login 
-			self.log.warn("Forcing login..")
-			token, user_object = self._api.login(self.fs.username, self.fs.password)
-		
-		if self.tf:
-			self.tf.flush()
-			# self.log.info("Uploading %s" %(self.path))
-			rc = upload_file(self.fs.post_url, token, self.tf.name, self.path)
-			# self.log.info("upload_file %s returned %s" %(self.path, rc))
-			self.tf.close()
-
-		# self.log.info("closed %s" %(self.path))
-
-#@FuncLog(None)
-def upload_file(post_url, token, localfile, path):
-
-	log = logging.getLogger('uploadFile')
-
-	if not os.path.exists(localfile):
-		log.error("File does not exist: %s" % (localfile))
-		return False
-
-	st = os.stat(localfile)
-	if st.st_size == 0:
-		log.error("File exists but is zero length: %s" % (localfile))
-		return False
-
-	log.info("File %s stat %s" % (localfile, st))
-
-	path = str(normpath(path))
-	directory = os.path.dirname(path)
-	basename = os.path.basename(path)
-
-	request_headers = {}
-
-	response_headers = []
-
-	rc = 0
-	log.info("Uploading %s to %s" % (localfile, post_url))
-	try:
-		ch = pycurl.Curl()
-		ch.setopt(ch.POST, 1)
-		ch.setopt(ch.HTTPPOST, [
-		   ('uploadFile', (ch.FORM_FILE, localfile)),
-		   ('directory', directory),
-		   ('basename', basename)
-		])
-		headers = []
-		headers.append("X-LLNW-Authorization: %s" % (str(token)))
-		for k, v in request_headers.iteritems():
-			headers.append("%s: %s" % (k, v))
-		ch.setopt(ch.FORBID_REUSE, 1)
-		ch.setopt(ch.VERBOSE, 1)
-		ch.setopt(ch.HTTPHEADER, headers)
-		ch.setopt(ch.HEADERFUNCTION, response_headers.append)
-		ch.setopt(ch.URL, post_url)
-		ch.setopt(ch.SSL_VERIFYPEER, 0)
-		ch.setopt(ch.SSL_VERIFYHOST, 0)
-
-		log.info("directory %s, basename %s" % (directory, basename))
-
-		ch.perform()
-		ch.close()
-
-	except Exception, e:
-		traceback.print_exc()
-		log.error("%s" % (e))
-
-	result = {}
-	for line in response_headers:
-		line = line.lower()
-		if line.startswith('x-llnw'):
-			k, v = line.split(":", 1)
-			result[k[7:]] = v.strip()
-	if 'size' in result:
-		result['size'] = int(result['size'])
-	if 'status' in result:
-		result['status'] = int(result['status'])
-
-	log.info("File %s, result: %s" % (path, result))
-	return rc
-
-class AgileFS(FS):
+class LAMAFS(FS):
 	"""
 	lama file system
 	"""
@@ -407,7 +114,7 @@ class AgileFS(FS):
 				port = 8080
 			self.post_url = "http://%s:%d/post/file" % (fqdn, port)
 
-		# self.log.info("api url %s, post url %s" % (self.api_url, self.post_url))
+		self.log.info("api url %s, post url %s" % (self.api_url, self.post_url))
 
 		self.apicfg = dict(CFG.items('api'))
 		self.egress_url = self.apicfg.get('egress_url')
@@ -425,7 +132,7 @@ class AgileFS(FS):
 		self.api = AuthProxy(a, username, password, None, persisted_token, update_token_cb = self._update_token_cb )
 		self.api.noisy = False # DEBUG
 
-		# self.log.info("Using API at %s" % (self.api_url))
+		self.log.info("Using API at %s" % (self.api_url))
 
 		self.cache_paths = {}
 		self.open_files = {}
@@ -434,7 +141,7 @@ class AgileFS(FS):
 		if token == None:
 			self.log.warn("No token received after login")
 			return
-		# self.log.debug("new token %s" % (repr(token)))
+		self.log.debug("new token %s" % (repr(token)))
 		self.token = token
 		return token
 	   
@@ -604,7 +311,7 @@ class AgileFS(FS):
 			
 	#@FuncLog(None)
 	def close(self):
-		# self.log.info("closing down")
+		self.log.info("closing down")
 		return True
 
 	#@FuncLog(None)
@@ -714,14 +421,14 @@ class AuthProxy(object):
 		login if the token is not set
 		"""
 		if self.token:
-			# self.log.debug("already logged in with token %s" % (self.token))
+			self.log.debug("already logged in with token %s" % (self.token))
 			return False
-		# self.log.debug("Logging in with %s %s" % (repr(self.user), repr(self.password)))
+		self.log.debug("Logging in with %s %s" % (repr(self.user), repr(self.password)))
 		token, user_object = self.api.login(self.user, self.password)
 		self.token = token
 		self.update_token_cb(token)
 		self.user_object = user_object
-		# self.log.debug("login token %s" % (self.token))
+		self.log.debug("login token %s" % (self.token))
 		return True
 
 	def __call__(self, *args):
@@ -730,7 +437,7 @@ class AuthProxy(object):
 		method = getattr(self.api, self.name)
 		ret = None
 
-		#self.log.debug("%s %s" % (method, newargs))
+		# self.log.debug("%s %s" % (method, newargs))
 
 		try:
 			ret = method(*newargs)
@@ -743,8 +450,7 @@ class AuthProxy(object):
 		if self.noisy:
 			frame = 1
 			caller = sys._getframe(frame).f_code.co_name
-			# self.log.debug("[%s] %s%s" % (caller, self.name, repr(args)))
-			#self.log.debug("[%s] %s%s -> %s" % (caller, self.name, repr(args), repr(ret)))
+			self.log.debug("[%s] %s%s -> %s" % (caller, self.name, repr(args), repr(ret)))
 
 		return ret
 
