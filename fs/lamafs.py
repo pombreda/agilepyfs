@@ -2,7 +2,7 @@
 pyfilesystem module for agile
 
 """
-DEBUG = False
+DEBUG = True
 
 import os, sys, stat, logging
 import urlparse
