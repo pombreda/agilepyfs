@@ -2,22 +2,18 @@
 pyfilesystem module for agile
 
 """
-DEBUG = True
+DEBUG = False
 
 import os, sys, stat, logging
 import urlparse
+import StringIO
 import datetime, time
 from functools import wraps
 
 from ConfigParser import SafeConfigParser
 
 from jsonrpc import ServiceProxy, JSONRPCException
-
-# from fs.base import FS
-# from fs.path import normpath
-# from fs.errors import ResourceNotFoundError, ResourceInvalidError, UnsupportedError
-# from fs.remote import RemoteFileBuffer, CacheFS
-# from fs.opener import Opener
+import json
 
 from fs.base import *
 from fs.path import *
@@ -39,8 +35,6 @@ if HOME:
 else:
 	userconfdir = None
 CFG.read(cfgfiles)
-
-
 
 FTYPE_DIR = 1
 FTYPE_FILE = 2
@@ -75,14 +69,75 @@ def FuncLog(name):
 		return wrapper2
 	return wrapper
 
+"""
+class myStringIO(StringIO.StringIO, object):
+	# simple wrapper due to DropBox that need a 'physical' file
+	def __init__(self, name, data):
+		self.data = data
+		super(myStringIO, self).__init__(  self.data )
+		self.name = name
+		self.closed = False
+	def tell(self):
+		return len(self.data)
+	def seek(self, *args):
+		pass
+"""
+
+class _LAMAFSFile(object):
+
+	""" A file-like that provides access to a file with Agile CLU API """
+
+	def __init__(self, lamafs, path, mode = 'r'):
+		if not path.startswith('/'):
+			path = u'/%s' % path
+		self.lamafs = lamafs
+		self.path = path
+		self.mode = mode
+		self.closed = False
+		self.file_size = 0
+		#if 'r' in mode or 'a' in mode:
+		 #   self.file_size = dropboxfs.getsize(path)
+		 
+	#@FuncLog(None)
+	def getCacheDir(self, dir = False):
+		if dir:
+			return self.path
+		root = os.path.split(self.path)[0]
+		if root == '':
+			root = '/'
+		return root
+		
+	#@FuncLog(None)
+	def getFullPath(self):
+		return self.dropboxfs.getDropBoxFullPath( self.path )
+
+	#@FuncLog(None)
+	def read(self):
+		# read file; might be funky on resp.read() vs lamafs.read is a buffer
+		if self.lamafs.fexists(self.path):
+			resp = self.lamafs.read( path=self.path )
+			return resp.read()
+		else:
+			return False
+		
+	#@FuncLog(None)
+	def write(self, data):
+		# write to dropbox
+		# cfile = myStringIO(self.path, data)
+		# resp = self.lamafs.dropBoxCommand('put_file', path = self.path, data = cfile)
+		# self.lamafs.refreshDirCache( os.path.split(self.path)[0] )
+		return (resp.status == 200)
+
+	#@FuncLog(None)
+	def close(self):
+		self.closed = True		
 
 class LAMAFS(FS):
 	"""
 	lama file system
 	"""
 	
-	_meta = { 'thread_safe' : False,
-			  'network' : True,
+	_meta = { 'network' : True,
 			  'virtual': False,
 			  'read_only' : False,
 			  'unicode_paths' : True,
@@ -219,27 +274,55 @@ class LAMAFS(FS):
 	
 	#@FuncLog(None)
 	def isdir(self, path):
-		r = self.api.stat(path )
-		if r['code']  == -1: 
-			return False
-		if r['type'] == FTYPE_DIR:
+		if path in ['/']:
 			return True
-		elif r['type'] == FTYPE_FILE:
-			return False
 		else:
-			return False
+			cache = self.cache_paths.get( path )
+			if cache:
+				return True
+			else:
+				cache = self.cache_paths.get( os.path.split(path)[0] )
+				if cache:
+					for o in cache['directories']:
+						if o['name']==os.path.split(path)[1]:
+							return True
+					return False
+				else:
+					r = self.api.stat(path )
+					if r['code']  == -1: 
+						return False
+					if r['type'] == FTYPE_DIR:
+						return True
+					elif r['type'] == FTYPE_FILE:
+						return False
+					else:
+						return False
 
 	#@FuncLog(None)
 	def isfile(self, path):
-		r = self.api.stat(path)
-		if r['code']  == -1: 
+		if path in ['', '/']:
 			return False
-		if r['type'] == FTYPE_FILE:
-			return True
-		elif r['type'] == FTYPE_DIR:
+
+		cache = self.cache_paths.get( path )
+		if cache:
 			return False
 		else:
-			return False
+			cache = self.cache_paths.get( os.path.split(path)[0] )
+			if cache:
+				for o in cache['files']:
+					if o['name']==os.path.split(path)[1]:
+						return True
+				return False
+			else:
+				r = self.api.stat(path)
+				if r['code']  == -1: 
+					return False
+				if r['type'] == FTYPE_FILE:
+					return True
+				elif r['type'] == FTYPE_DIR:
+					return False
+				else:
+					return False
 
 	#@FuncLog(None)
 	def makedir(self, path, recursive=False, allow_recreate=False):
@@ -294,19 +377,24 @@ class LAMAFS(FS):
 	def __getNodeInfo(self, path, overrideCache = False):
 		# check if file exists in cached data or fecth target dir
 		(root, file) = self.__getBasePath( path )
-		 
+		if root in ['']: root='/'
+
+		caller = sys._getframe(1).f_code.co_name
 		cache = self.cache_paths.get( root )
+		self.log.debug("[%s] READ CACHE (%s) -> %s\n" % (caller, root, repr(cache)))
+
 		# check if in cache
 		item = None
 		if cache and not overrideCache:
-			item = [item for item in cache if item['stat']['type']==2] or None
-			if item: 
-				item = item[0]
+			for o in cache['files']:
+				self.log.debug("[%s] check if item %s=%s\n" % (caller, o['name'], file))
+				if o['name']==file: item=o
 		else:
 			# fetch listdir in cache then restart
-			res = self.listdir( root )
+			res = self.listdir( path )
+			self.log.debug("[%s] fetch listdir in cache restart %s\n" % (caller, repr(res)))
 			if res:
-				item = self.__getNodeInfo( path )
+				item = self.__getNodeInfo( root )
 		return item
 			
 	#@FuncLog(None)
@@ -321,7 +409,7 @@ class LAMAFS(FS):
 					  absolute=False,
 					  dirs_only=False,
 					  files_only=False,
-					  overrideCache=True
+					  overrideCache=False
 					  ):
 		djson=[]
 		fjson=[]
@@ -329,15 +417,46 @@ class LAMAFS(FS):
 		d=[]
 		f=[]
 		list = []
-		if not files_only: 
-			djson = self.api.listDir( path, 1000, 0, False )
-			d=[f['name'] for f in djson['list']]
-			list.extend(d)
 
-		if not dirs_only:  
-			fjson = self.api.listFile( path, 1000, 0, False )
-			f=[f['name'] for f in fjson['list']]
-			list.extend(f)
+		if not path.startswith('/'):
+			path=u'/%s' % path
+
+		f = _LAMAFSFile( self, path )
+		cachedir = f.getCacheDir(dir=True)
+
+		cache = self.cache_paths.get( cachedir )
+		caller = sys._getframe(1).f_code.co_name
+		self.log.debug("[%s] CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
+
+		if cache and not overrideCache:
+			if not files_only:
+				d=[o['name'] for o in cache['directories']] ; list.extend(d)
+			if not dirs_only:
+				f=[o['name'] for o in cache['files']] ; list.extend(f)
+
+		else:
+			djson = self.api.listDir( path, 1000, 0, True )
+			fjson = self.api.listFile( path, 1000, 0, True )
+
+			if not files_only: 
+				d=[f['name'] for f in djson['list']] ; list.extend(d)
+
+			if not dirs_only:  
+				f=[f['name'] for f in fjson['list']] ; list.extend(f)
+
+			jsonstr = '''{ "path": "'''+path+'''", "files": [ '''
+			for object in fjson['list']: 
+				jsonstr = jsonstr + '''{ "name": "'''+object['name']+'''", "ctime": '''+str(object['stat']['ctime'])+''', "mtime": '''+str(object['stat']['mtime'])+''', "size": '''+str(object['stat']['size'])+''' },'''
+			jsonstr = jsonstr[0:len(jsonstr)-1]
+			jsonstr = jsonstr + ''' ], "directories": [ '''
+			for object in djson['list']:
+				jsonstr = jsonstr + '''{ "name": "'''+object['name']+'''", "ctime": '''+str(object['stat']['ctime'])+''', "mtime": '''+str(object['stat']['mtime'])+''', "size": 0 },'''
+			jsonstr = jsonstr[0:len(jsonstr)-1]
+			jsonstr = jsonstr + ''' ] }'''
+
+			self.cache_paths[cachedir] = json.loads(jsonstr)
+			cache = self.cache_paths.get( cachedir )
+			self.log.debug("[%s] WRITE CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
 
 		return self._listdir_helper(path, list, wildcard, full, absolute, dirs_only, files_only)
 
@@ -423,7 +542,7 @@ class AuthProxy(object):
 		if self.token:
 			self.log.debug("already logged in with token %s" % (self.token))
 			return False
-		self.log.debug("Logging in with %s %s" % (repr(self.user), repr(self.password)))
+		self.log.debug("Logging in with %s xxx" % (repr(self.user)))
 		token, user_object = self.api.login(self.user, self.password)
 		self.token = token
 		self.update_token_cb(token)
