@@ -217,6 +217,7 @@ class LAMAFS(FS):
 
 	#@FuncLog(None)
 	def getinfo(self, path, overrideCache = False):
+		caller = sys._getframe(1).f_code.co_name
 
 		if path in self.open_files:
 			#Create a fake stat object for open files
@@ -228,6 +229,32 @@ class LAMAFS(FS):
 			return fst
 
 		#node = self.__getNodeInfo(path, overrideCache = overrideCache)
+		cache = self.cache_paths.get( path )
+		self.log.debug("[%s] CACHE %s -> %s\n" % (caller,path,repr(cache)))
+		if not cache:
+			cache = self.cache_paths.get( os.path.split(path)[0] )
+			self.log.debug("[%s] CACHE %s -> %s\n" % (caller,path,repr(cache)))
+
+		if cache:
+			self.log.debug("[%s] CHECKING CACHE (%s)\n" % (caller,path))
+			found=None
+			for o in cache['files']:
+				if o['name']==os.path.split(path)[1]:
+					found=o ; otype = 0700 | stat.S_IFREG
+			for o in cache['directories']:
+				if o['name']==os.path.split(path)[1]:
+					found=o ; otype = 0700 | stat.S_IFDIR
+			if found:
+				node={}
+				node['size'] = found['size']
+				node['modified_time'] = datetime.datetime.fromtimestamp(found['mtime'])
+				node['created_time'] = datetime.datetime.fromtimestamp(found['ctime'])
+				node['accessed_time'] = datetime.datetime.fromtimestamp(time.time())
+				node['st_mode'] = otype
+				return node
+
+		self.log.debug("[%s] NOT FROM CACHE (%s)\n" % (caller,path))
+
 		st = self.api.stat(path)
 		if not st['code'] == 0:
 		   raise ResourceNotFoundError
@@ -343,7 +370,7 @@ class LAMAFS(FS):
 	def refreshDirCache(self, path):
 		(root1, file) = self.__getBasePath( path )
 		# reload cache for dir
-		self.listdir(root1, overrideCache=True)
+		self.listdir(root1, overrideCache=False)
 
 	#@FuncLog(None)
 	def removedir(self, path):		
@@ -413,7 +440,7 @@ class LAMAFS(FS):
 					  ):
 		djson=[]
 		fjson=[]
-		df =[]
+		df=[]
 		d=[]
 		f=[]
 		list = []
@@ -467,39 +494,90 @@ class LAMAFS(FS):
 					  absolute=False,
 					  dirs_only=False,
 					  files_only=False,
-					  overrideCache=True
+					  overrideCache=False
 					  ):
 		djson=[]
 		fjson=[]
-		df =[]
+		df=[]
 		d=[]
 		f=[]
 		list = []
-		if not files_only:
-			djson = self.api.listDir( path, 1000, 0, True)
-			for f in djson['list']:
-			   s = f['stat']
-			   st = {
-				  'size' : s['size'],
-				  'created_time' : datetime.datetime.fromtimestamp(s['mtime']),
-				  'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
-				  'modified_time' : datetime.datetime.fromtimestamp(s['mtime']),
-				  'st_mode' : 0700 | stat.S_IFDIR
-			   }
-			   list.append((f['name'], st))
 
-		if not dirs_only: 
+		if not path.startswith('/'):
+			path=u'/%s' % path
+
+		f = _LAMAFSFile( self, path )
+		cachedir = f.getCacheDir(dir=True)
+
+		cache = self.cache_paths.get( cachedir )
+		caller = sys._getframe(1).f_code.co_name
+		self.log.debug("[%s] CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
+
+		if cache and not overrideCache:
+			if not files_only:
+				for o in cache['directories']:
+					st = {
+						'size' : o['size'],
+						'created_time' : datetime.datetime.fromtimestamp(o['ctime']),
+						'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
+						'modified_time' : datetime.datetime.fromtimestamp(o['mtime']),
+						'st_mode' : 0700 | stat.S_IFDIR
+					}
+					list.append((o['name'],st))
+
+			if not dirs_only:
+				for o in cache['files']:
+					st = {
+						'size' : o['size'],
+						'created_time' : datetime.datetime.fromtimestamp(o['ctime']),
+						'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
+						'modified_time' : datetime.datetime.fromtimestamp(o['mtime']),
+						'st_mode' : 0700 | stat.S_IFREG
+					}
+					list.append((o['name'],st))
+
+		else:
+			djson = self.api.listDir( path, 1000, 0, True)
 			fjson = self.api.listFile( path, 1000, 0, True )
-			for f in fjson['list']:
-			   s = f['stat']
-			   st = {
-				  'size' : s['size'],
-				  'created_time' : datetime.datetime.fromtimestamp(s['mtime']),
-				  'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
-				  'modified_time' : datetime.datetime.fromtimestamp(s['mtime']),
-				  'st_mode' : 0700 | stat.S_IFREG
-			   }
-			   list.append((f['name'], st))
+
+			if not files_only:
+				for f in djson['list']:
+				   s = f['stat']
+				   st = {
+					  'size' : s['size'],
+					  'created_time' : datetime.datetime.fromtimestamp(s['mtime']),
+					  'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
+					  'modified_time' : datetime.datetime.fromtimestamp(s['mtime']),
+					  'st_mode' : 0700 | stat.S_IFDIR
+				   }
+				   list.append((f['name'], st))
+
+			if not dirs_only: 
+				for f in fjson['list']:
+				   s = f['stat']
+				   st = {
+					  'size' : s['size'],
+					  'created_time' : datetime.datetime.fromtimestamp(s['mtime']),
+					  'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
+					  'modified_time' : datetime.datetime.fromtimestamp(s['mtime']),
+					  'st_mode' : 0700 | stat.S_IFREG
+				   }
+				   list.append((f['name'], st))
+
+			jsonstr = '''{ "path": "'''+path+'''", "files": [ '''
+			for object in fjson['list']: 
+				jsonstr = jsonstr + '''{ "name": "'''+object['name']+'''", "ctime": '''+str(object['stat']['ctime'])+''', "mtime": '''+str(object['stat']['mtime'])+''', "size": '''+str(object['stat']['size'])+''' },'''
+			jsonstr = jsonstr[0:len(jsonstr)-1]
+			jsonstr = jsonstr + ''' ], "directories": [ '''
+			for object in djson['list']:
+				jsonstr = jsonstr + '''{ "name": "'''+object['name']+'''", "ctime": '''+str(object['stat']['ctime'])+''', "mtime": '''+str(object['stat']['mtime'])+''', "size": 0 },'''
+			jsonstr = jsonstr[0:len(jsonstr)-1]
+			jsonstr = jsonstr + ''' ] }'''
+
+			self.cache_paths[cachedir] = json.loads(jsonstr)
+			cache = self.cache_paths.get( cachedir )
+			self.log.debug("[%s] WRITE CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
+
 
 		#return self._listdir_helper(path, list, wildcard, full, absolute, dirs_only, files_only)
 		return list

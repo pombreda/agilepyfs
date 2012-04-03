@@ -132,7 +132,7 @@ Mounts a file system on a system path"""
                 kwargs['rdonly'] = True
 
             kwargs['auto_cache'] = True
-            kwargs['nothreads'] = True
+            # kwargs['nothreads'] = True
 				
 
             if options.foreground:
