@@ -2,10 +2,10 @@
 pyfilesystem module for agile
 
 """
-DEBUG = True
+DEBUG = False
 
 import os, sys, stat, logging
-import urlparse
+import urlparse, urllib
 import StringIO
 import datetime, time
 from functools import wraps
@@ -117,6 +117,176 @@ class _LAMAFSFile(object):
 	#@FuncLog(None)
 	def close(self):
 		self.closed = True		
+
+class LAMAFile(object):
+
+	noisy = True
+
+	def __init__(self, fs, path, mode):
+		self.log = logging.getLogger(self.__class__.__name__)
+		self.fs = fs
+		self.egress_url = fs.egress_url
+		self.api = fs.api
+		self._api = fs._api
+		self.path = normpath(path)
+		self.mode = mode
+		self.closed = False
+		self.file_size = None
+		if 'r' in mode or 'a' in mode:
+			self.file_size = fs.getsize(path)
+
+		# self.log.debug("File %s, mode %s" % (path, mode))
+
+		tmpdir = '/tmp/agile'
+		if not os.path.exists(tmpdir):
+			os.makedirs(tmpdir)
+
+		if 'w' in mode or 'r+' in mode:
+			self.tf = tempfile.NamedTemporaryFile(dir=tmpdir)
+			# Useful only for streaming uploads (Not implemented yet)
+			self.fd = 0 # self._start_upload(path, path)
+		else:
+			self.tf = None
+			self.fd = None
+
+		
+	def __str__(self):
+		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, self.tf.name)
+
+	def __repr__(self):
+
+		if self.tf:
+			name = self.tf
+		else:
+			name = None
+
+		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, name)
+
+	def _start_upload(self, src, dst):
+		directory = os.path.dirname(normpath('/'+dst))
+		basename = os.path.basename(normpath('/'+dst))
+
+		api = self.fs.api
+		post_url = self.fs.post_url
+		rfd, wfd = os.pipe()
+		pid = os.fork()
+
+		# self.log.debug("pipe read %d, write %d" % (rfd, wfd))
+
+		if pid == 0:
+			# self.log.info("Stared upload %s to %s, reading from %d" % (src, post_url, rfd))
+
+			try:
+				fp = os.fdopen(rfd)
+				datagen, request_headers = multipart_encode(dict([
+				   ('uploadFile', fp),
+				   ('directory', directory),
+				   ('basename', basename)
+				]))
+				os.close(wfd)
+				ch = pycurl.Curl()
+				ch.setopt(ch.POST, 1)
+				response_headers = []
+				headers = []
+				headers.append("X-LLNW-Authorization: %s" % (str(api.token)))
+				for k, v in request_headers.iteritems():
+					headers.append("%s: %s" % (k, v))
+				ch.setopt(ch.FORBID_REUSE, 1)
+				if self.noisy:
+					#ch.setopt(ch.VERBOSE, 1)
+					pass
+				ch.setopt(ch.HTTPHEADER, headers)
+				ch.setopt(ch.READFUNCTION, FileReader(datagen))
+				ch.setopt(ch.HEADERFUNCTION, response_headers.append)
+				ch.setopt(ch.URL, post_url)
+
+				# self.log.info("directory %s, basename %s" % (directory, basename))
+
+				ch.setopt(ch.SSL_VERIFYPEER, 0)
+				ch.setopt(ch.SSL_VERIFYHOST, 0)
+
+				# self.log.info("Writing to pipe %d" % (rfd))
+				ch.perform()
+
+			except Exception, e:
+				traceback.print_exc()
+				self.log.error("%s" % (e))
+
+			# self.log.debug("close %d" % (rfd))
+			os.close(rfd)
+			#sys.exit(0)
+			# self.log.debug("finished")
+			
+		else:
+			# self.log.info("upload child pid %s" % (pid))
+			os.close(rfd)
+			return wfd
+
+	#@FuncLog(None)
+	def setcontents(self, path, contents, chunk_size=64*1024):
+		contents.seek(0)
+		data = contents.read(chunk_size)
+		while data:
+			tf.write(data)
+			data = contents.read(chunk_size)
+
+		rc = upload_file(self.post_url, self.api.token, tf.name, path)
+
+
+	#@FuncLog(None)
+	def write(self, data):
+		self.tf.write(data)
+
+	#@FuncLog(None)
+	def read(self, n):
+		if self.tf:
+			return self.tf.read(n)
+
+		# Read from mapper
+		if not hasattr(self, 'urlf'):
+			egress_url = "%s%s" % (self.egress_url, self.path)
+			# self.log.info("Egress URL %s" % (egress_url))
+			urlf = urllib.urlopen(egress_url)
+			self.urlf = urlf
+
+		return self.urlf.read(n)
+
+	#@FuncLog(None)
+	def flush(self):
+		# self.log.info("flush %s" % (self.path))
+		pass
+
+	#@FuncLog(None)
+	def seek(self, offset, whence=0):
+		return None
+
+	#@FuncLog(None)
+	def close(self):
+		self.closed = True		
+		if self.fd:
+			os.close(self.fd)
+
+		token = self.api._get_token()
+
+		if token == None:
+			self.api.noop()
+			token = self.fs.api._get_token()
+
+		if token == None:
+			# TODO: Why doesn't the former work? ... some reference hell?
+			# Force a login 
+			self.log.warn("Forcing login..")
+			token, user_object = self._api.login(self.fs.username, self.fs.password)
+		
+		if self.tf:
+			self.tf.flush()
+			# self.log.info("Uploading %s" %(self.path))
+			rc = upload_file(self.fs.post_url, token, self.tf.name, self.path)
+			# self.log.info("upload_file %s returned %s" %(self.path, rc))
+			self.tf.close()
+
+		# self.log.info("closed %s" %(self.path))
+
 
 class LAMAFS(FS):
 	"""
@@ -278,7 +448,7 @@ class LAMAFS(FS):
 				self.log.warn("ResourceNotFoundError %s" % (path))
 				raise ResourceNotFoundError(path)
 
-		lf = LamaFile(self, path, mode) 
+		lf = LAMAFile (self, path, mode) 
 
 		if 'w' in mode or 'r+' in mode:
 			self.open_files[path] = lf
