@@ -19,7 +19,8 @@ COMMANDS = ['fscat',
             'fsserve',
             'fstree',
             'fsmkdir',
-            'fsmount']
+            'fsmount',
+            'agilemount']
 
 
 classifiers = [

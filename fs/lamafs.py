@@ -10,7 +10,7 @@ import StringIO
 import datetime, time
 from functools import wraps
 
-from ConfigParser import SafeConfigParser
+import ConfigParser 
 
 from jsonrpc import ServiceProxy, JSONRPCException
 import json
@@ -21,21 +21,7 @@ from fs.errors import *
 from fs.remote import *
 from fs.filelike import LimitBytesFile
 
-CFG = SafeConfigParser()
-sysconf = os.path.join('/etc/agile/pyfs.ini')
-cfgfiles = [sysconf]
-
-boolval = lambda s: str(s).lower() in [ '1', 'true', 'yes', 'on' ]
-
-HOME = os.environ.get('HOME')
-if HOME:
-	userconfdir = os.path.join(HOME, '.agile')
-	userconf = os.path.join(userconfdir, 'pyfs.ini')
-	cfgfiles.append(userconf)
-else:
-	userconfdir = None
-CFG.read(cfgfiles)
-
+	
 FTYPE_DIR = 1
 FTYPE_FILE = 2
 
@@ -150,7 +136,16 @@ class LAMAFS(FS):
 			  'file.read_and_write' : False,
 			  }
 			  
-	def __init__(self, url, username = None, password = None):		
+	def __init__(self, url = None, username = None, password = None):		
+
+		self.cfg= ConfigParser.ConfigParser()
+		if os.path.exists('/etc/agile/agile.conf'): self.cfg.read('/etc/agile/agile.conf')
+
+		url = 'https://api.lama.lldns.net'
+		username = self.cfg.get('Identity','username')
+		password = self.cfg.get('Identity','password')
+		self.egress_url = self.cfg.get('Egress','mapperurl')
+
 		self.log = logging.getLogger(self.__class__.__name__)
 		self.root_url = url
 		self.api_url = "%s/jsonrpc" % (self.root_url)
@@ -171,11 +166,8 @@ class LAMAFS(FS):
 
 		self.log.info("api url %s, post url %s" % (self.api_url, self.post_url))
 
-		self.apicfg = dict(CFG.items('api'))
-		self.egress_url = self.apicfg.get('egress_url')
 
 		# TODO: Support persisted tokens somewhere
-		persisted_token = self.apicfg.get('token')
 		persisted_token = None
 
 		self.username = username

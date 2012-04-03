@@ -594,7 +594,7 @@ class AgileOpener(Opener):
         from fs.agilefs import AgileFS
         # fs_path, resourcename = pathsplit(fs_path)
 
-        agilefs = AgileFS('https://api.lama.lldns.net','wylie','Lime4545!')
+        agilefs = AgileFS()
         agilefs.cache_hint(True)
 
         if fs_path:
@@ -610,7 +610,7 @@ class LAMAOpener(Opener):
         from fs.lamafs import LAMAFS
         # fs_path, resourcename = pathsplit(fs_path)
 
-        lamafs = LAMAFS('https://api.lama.lldns.net','wylie','Lime4545!')
+        lamafs = LAMAFS()
         lamafs.cache_hint(True)
 
         if fs_path:
