@@ -2,7 +2,7 @@
 pyfilesystem module for agile
 
 """
-DEBUG = True
+DEBUG = False
 
 import os, sys, stat, logging
 import urlparse, urllib
@@ -128,10 +128,9 @@ class _LAMAFSFile(object):
 
 	""" A file-like that provides access to a file with Agile CLU API """
 
-	def __init__(self, lamafs, path, mode = 'r'):
-		if not path.startswith('/'):
-			path = u'/%s' % path
-		self.lamafs = lamafs
+	def __init__(self, agilefs, path, mode = 'r'):
+		if not path.startswith('/'): path = u'/%s' % path
+		self.agilefs = agilefs
 		self.path = path
 		self.mode = mode
 		self.closed = False
@@ -154,9 +153,9 @@ class _LAMAFSFile(object):
 
 	#@FuncLog(None)
 	def read(self):
-		# read file; might be funky on resp.read() vs lamafs.read is a buffer
-		if self.lamafs.fexists(self.path):
-			resp = self.lamafs.read( path=self.path )
+		# read file; might be funky on resp.read() vs agilefs.read is a buffer
+		if self.agilefs.fexists(self.path):
+			resp = self.agilefs.read( path=self.path )
 			return resp.read()
 		else:
 			return False
@@ -165,8 +164,8 @@ class _LAMAFSFile(object):
 	def write(self, data):
 		# write to dropbox
 		# cfile = myStringIO(self.path, data)
-		# resp = self.lamafs.dropBoxCommand('put_file', path = self.path, data = cfile)
-		# self.lamafs.refreshDirCache( os.path.split(self.path)[0] )
+		# resp = self.agilefs.dropBoxCommand('put_file', path = self.path, data = cfile)
+		# self.agilefs.refreshDirCache( os.path.split(self.path)[0] )
 		return (resp.status == 200)
 
 	#@FuncLog(None)
@@ -190,11 +189,10 @@ class LAMAFile(object):
 		if 'r' in mode or 'a' in mode:
 			self.file_size = fs.getsize(path)
 
-		# self.log.debug("File %s, mode %s" % (path, mode))
+		self.log.debug("File %s, mode %s" % (path, mode))
 
-		tmpdir = '/tmp/agile'
-		if not os.path.exists(tmpdir):
-			os.makedirs(tmpdir)
+		tmpdir = '/tmp/agile' 
+		if not os.path.exists(tmpdir): os.makedirs(tmpdir)
 
 		if 'w' in mode or 'r+' in mode:
 			self.tf = tempfile.NamedTemporaryFile(dir=tmpdir)
@@ -209,12 +207,8 @@ class LAMAFile(object):
 		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, self.tf.name)
 
 	def __repr__(self):
-
-		if self.tf:
-			name = self.tf
-		else:
-			name = None
-
+		if self.tf: name = self.tf
+		else: name = None
 		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, name)
 
 	def _start_upload(self, src, dst):
@@ -226,10 +220,10 @@ class LAMAFile(object):
 		rfd, wfd = os.pipe()
 		pid = os.fork()
 
-		# self.log.debug("pipe read %d, write %d" % (rfd, wfd))
+		self.log.debug("pipe read %d, write %d" % (rfd, wfd))
 
 		if pid == 0:
-			# self.log.info("Stared upload %s to %s, reading from %d" % (src, post_url, rfd))
+			self.log.info("Stared upload %s to %s, reading from %d" % (src, post_url, rfd))
 
 			try:
 				fp = os.fdopen(rfd)
@@ -255,12 +249,12 @@ class LAMAFile(object):
 				ch.setopt(ch.HEADERFUNCTION, response_headers.append)
 				ch.setopt(ch.URL, post_url)
 
-				# self.log.info("directory %s, basename %s" % (directory, basename))
+				self.log.info("directory %s, basename %s" % (directory, basename))
 
 				ch.setopt(ch.SSL_VERIFYPEER, 0)
 				ch.setopt(ch.SSL_VERIFYHOST, 0)
 
-				# self.log.info("Writing to pipe %d" % (rfd))
+				self.log.info("Writing to pipe %d" % (rfd))
 				ch.perform()
 
 			except Exception, e:
@@ -415,7 +409,23 @@ class LAMAFS(FS):
 	   
 	#@FuncLog(None)
 	def getsize(self, path):
-		#item = self.__getNodeInfo( path )
+		cachepath = os.path.split(path)[0]
+		cache = self.cache_paths.get( cachepath )
+		if cache:
+			#self.log.debug("[%s] SCANNING CACHE (%s)\n" % (caller,cachepath))
+			found=None
+			if cache['path']==path:
+				found=cache ; otype = 0700 | stat.S_IFDIR
+			if not found:
+				for o in cache['files']:
+					if o['name']==os.path.split(path)[1]:
+						found=o ; otype = 0700 | stat.S_IFREG
+			if not found:
+				for o in cache['directories']:
+					if o['name']==os.path.split(path)[1]:
+						found=o ; otype = 0700 | stat.S_IFDIR
+			if found:
+				return found['size']
 		st = self.api.stat(path)
 		return st.get('size',0)
 

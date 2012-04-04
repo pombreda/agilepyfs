@@ -129,10 +129,10 @@ Mounts a file system on a system path"""
                 kwargs['noapplexattr'] = True
                 kwargs['negative_vncache'] = True
                 # kwargs['nobrowse'] = True
-                # kwargs['rdonly'] = True
-                # if os.path.isfile("/etc/agile/AgileVolume.icns"):
-                kwargs['modules'] = 'volicon'
-                kwargs['iconpath'] = '/etc/agile/AgileVolume.icns'
+                kwargs['rdonly'] = True
+                if os.path.isfile("/etc/agile/AgileVolume.icns"):
+                    kwargs['modules'] = 'volicon'
+                    kwargs['iconpath'] = '/etc/agile/AgileVolume.icns'
 
             kwargs['auto_cache'] = True
             # kwargs['nothreads'] = True
