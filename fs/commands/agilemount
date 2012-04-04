@@ -126,7 +126,8 @@ Mounts a file system on a system path"""
             if platform == 'Darwin':
                 kwargs['volname'] = "Agile Storage"
                 kwargs['noappledouble'] = True
-                kwargs['noapplexattr'] = True
+                # kwargs['noapplexattr'] = True # usually true
+                kwargs['local'] = True
                 kwargs['negative_vncache'] = True
                 # kwargs['nobrowse'] = True
                 # kwargs['rdonly'] = True
