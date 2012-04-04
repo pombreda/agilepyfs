@@ -638,8 +638,8 @@ class LAMAFS(FS):
 		else:
 
 			st = self.api.stat(path)
-			djson = self.api.listDir( path, 1000, 0, True )
-			fjson = self.api.listFile( path, 1000, 0, True )
+			djson = self.api.listDir( path, 10000, 0, True )
+			fjson = self.api.listFile( path, 10000, 0, True )
 
 			if not files_only: 
 				d=[f['name'] for f in djson['list']] ; list.extend(d)
@@ -703,8 +703,8 @@ class LAMAFS(FS):
 
 		else:
 			st = self.api.stat(path)
-			djson = self.api.listDir( path, 1000, 0, True)
-			fjson = self.api.listFile( path, 1000, 0, True )
+			djson = self.api.listDir( path, 10000, 0, True)
+			fjson = self.api.listFile( path, 10000, 0, True )
 
 			if not files_only:
 				for f in djson['list']:
