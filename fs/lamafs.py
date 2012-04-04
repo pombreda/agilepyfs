@@ -442,14 +442,16 @@ class LAMAFS(FS):
 			return fst
 
 		#node = self.__getNodeInfo(path, overrideCache = overrideCache)
-		cache = self.cache_paths.get( path )
-		#self.log.debug("[%s] PASS 1 READ CACHE %s -> %s\n" % (caller,path,repr(cache)))
+		cachepath = path
+		cache = self.cache_paths.get( cachepath )
+		#self.log.debug("[%s] PASS 1 READ CACHE %s -> %s\n" % (caller,cachepath,repr(cache)))
 		if not cache:
-			cache = self.cache_paths.get( os.path.split(path)[0] )
-			self.log.debug("[%s] PASS 2 READ CACHE %s -> %s\n" % (caller,path,repr(cache)))
+			cachepath = os.path.split(path)[0]
+			cache = self.cache_paths.get( cachepath )
+			#self.log.debug("[%s] PASS 2 READ CACHE %s -> %s\n" % (caller,cachepath,repr(cache)))
 
 		if cache and not overrideCache:
-			# self.log.debug("[%s] SCANNING CACHE (%s)\n" % (caller,path))
+			#self.log.debug("[%s] SCANNING CACHE (%s)\n" % (caller,cachepath))
 			found=None
 			if cache['path']==path:
 				found=cache ; otype = 0700 | stat.S_IFDIR
@@ -468,9 +470,12 @@ class LAMAFS(FS):
 				node['created_time'] = datetime.datetime.fromtimestamp(found['ctime'])
 				node['accessed_time'] = datetime.datetime.fromtimestamp(time.time())
 				node['st_mode'] = otype
+				#self.log.debug("[%s] FOUND (%s) IN CACHE (%s)\n" % (caller,path,cachepath))
 				return node
 
-		self.log.debug("[%s] STAT (%s) - NOT FOUND IN CACHE (%s)\n" % (caller,path,repr(cache)))
+			raise ResourceNotFoundError
+
+		self.log.debug("[%s] STAT (%s) - NOT FOUND IN CACHE (%s)\n" % (caller,path,cachepath))
 
 		st = self.api.stat(path)
 		if not st['code'] == 0:
@@ -622,7 +627,7 @@ class LAMAFS(FS):
 
 		cache = self.cache_paths.get( cachedir )
 		caller = sys._getframe(1).f_code.co_name
-		self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
+		# self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
 
 		if cache and not overrideCache:
 			if not files_only:
@@ -671,7 +676,7 @@ class LAMAFS(FS):
 
 		cache = self.cache_paths.get( cachedir )
 		caller = sys._getframe(1).f_code.co_name
-		self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
+		# self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
 
 		if cache and not overrideCache:
 			if not files_only:
