@@ -22,7 +22,7 @@ from fs.remote import *
 from fs.filelike import LimitBytesFile
 
 	
-FTYPE_DIR = 1
+FTYPE_DIRECTORY = 1
 FTYPE_FILE = 2
 
 if DEBUG:
@@ -55,28 +55,82 @@ def FuncLog(name):
 		return wrapper2
 	return wrapper
 
-"""
-class myStringIO(StringIO.StringIO, object):
-	# simple wrapper due to DropBox that need a 'physical' file
-	def __init__(self, name, data):
-		self.data = data
-		super(myStringIO, self).__init__(  self.data )
+
+class AuthProxy(object):
+	"""
+	Provides a Debug proxy class that logs requests and responses
+
+	"""
+	noisy = False
+
+	def __init__(self, api, user = None, password = None, name = None, token = None, update_token_cb = None):
+		self.log = logging.getLogger(self.__class__.__name__)
+		self.api = api
+		self.user = user
+		self.password = password
 		self.name = name
-		self.closed = False
-	def tell(self):
-		return len(self.data)
-	def seek(self, *args):
-		pass
-"""
+		self.token = token
+		self.user_object = None
+
+		if update_token_cb == None: update_token_cb = lambda token: token
+		self.update_token_cb = update_token_cb
+
+		if name == None and token: self.update_token_cb(token)
+
+	def __getattr__(self, name):
+		if not self.token:
+			self._login()
+		return AuthProxy(self.api, self.user, self.password, name, self.token, self.update_token_cb)
+
+	def _get_token(self):
+		return self.token
+
+	def _login(self):
+		"""
+		login if the token is not set
+		"""
+		if self.token:
+			self.log.debug("Token has already been established (%s:%s)" % (self.user,self.token))
+			return False
+
+		self.log.debug("Establishing a token for user (%s)" % (repr(self.user)))
+		token, user_object = self.api.login(self.user, self.password)
+		self.token = token
+		self.update_token_cb(token)
+		self.user_object = user_object
+		self.log.debug("Token established (%s:%s)" % (self.user,self.token))
+		return True
+
+	def __call__(self, *args):
+		#auth = request_authorization(self.name, self.key, self.secret)
+		newargs = [ self.token ] + list(args)
+		method = getattr(self.api, self.name)
+		ret = None
+
+		# self.log.debug("%s %s" % (method, newargs))
+
+		try:
+			ret = method(*newargs)
+
+		except JSONRPCException, e:
+			if hasattr(e, 'error'):
+				self.log.error("%s: %s" % (self.name, e.error))
+			raise e
+
+		if self.noisy:
+			frame = 1 ; caller = sys._getframe(frame).f_code.co_name
+			self.log.debug("[%s] %s%s -> %s" % (caller, self.name, repr(args), repr(ret)))
+
+		return ret
+
 
 class _LAMAFSFile(object):
 
 	""" A file-like that provides access to a file with Agile CLU API """
 
-	def __init__(self, lamafs, path, mode = 'r'):
-		if not path.startswith('/'):
-			path = u'/%s' % path
-		self.lamafs = lamafs
+	def __init__(self, agilefs, path, mode = 'r'):
+		if not path.startswith('/'): path = u'/%s' % path
+		self.agilefs = agilefs
 		self.path = path
 		self.mode = mode
 		self.closed = False
@@ -99,9 +153,9 @@ class _LAMAFSFile(object):
 
 	#@FuncLog(None)
 	def read(self):
-		# read file; might be funky on resp.read() vs lamafs.read is a buffer
-		if self.lamafs.fexists(self.path):
-			resp = self.lamafs.read( path=self.path )
+		# read file; might be funky on resp.read() vs agilefs.read is a buffer
+		if self.agilefs.fexists(self.path):
+			resp = self.agilefs.read( path=self.path )
 			return resp.read()
 		else:
 			return False
@@ -110,8 +164,8 @@ class _LAMAFSFile(object):
 	def write(self, data):
 		# write to dropbox
 		# cfile = myStringIO(self.path, data)
-		# resp = self.lamafs.dropBoxCommand('put_file', path = self.path, data = cfile)
-		# self.lamafs.refreshDirCache( os.path.split(self.path)[0] )
+		# resp = self.agilefs.dropBoxCommand('put_file', path = self.path, data = cfile)
+		# self.agilefs.refreshDirCache( os.path.split(self.path)[0] )
 		return (resp.status == 200)
 
 	#@FuncLog(None)
@@ -135,11 +189,10 @@ class LAMAFile(object):
 		if 'r' in mode or 'a' in mode:
 			self.file_size = fs.getsize(path)
 
-		# self.log.debug("File %s, mode %s" % (path, mode))
+		self.log.debug("File %s, mode %s" % (path, mode))
 
-		tmpdir = '/tmp/agile'
-		if not os.path.exists(tmpdir):
-			os.makedirs(tmpdir)
+		tmpdir = '/tmp/agile' 
+		if not os.path.exists(tmpdir): os.makedirs(tmpdir)
 
 		if 'w' in mode or 'r+' in mode:
 			self.tf = tempfile.NamedTemporaryFile(dir=tmpdir)
@@ -154,12 +207,8 @@ class LAMAFile(object):
 		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, self.tf.name)
 
 	def __repr__(self):
-
-		if self.tf:
-			name = self.tf
-		else:
-			name = None
-
+		if self.tf: name = self.tf
+		else: name = None
 		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, name)
 
 	def _start_upload(self, src, dst):
@@ -171,10 +220,10 @@ class LAMAFile(object):
 		rfd, wfd = os.pipe()
 		pid = os.fork()
 
-		# self.log.debug("pipe read %d, write %d" % (rfd, wfd))
+		self.log.debug("pipe read %d, write %d" % (rfd, wfd))
 
 		if pid == 0:
-			# self.log.info("Stared upload %s to %s, reading from %d" % (src, post_url, rfd))
+			self.log.info("Stared upload %s to %s, reading from %d" % (src, post_url, rfd))
 
 			try:
 				fp = os.fdopen(rfd)
@@ -200,12 +249,12 @@ class LAMAFile(object):
 				ch.setopt(ch.HEADERFUNCTION, response_headers.append)
 				ch.setopt(ch.URL, post_url)
 
-				# self.log.info("directory %s, basename %s" % (directory, basename))
+				self.log.info("directory %s, basename %s" % (directory, basename))
 
 				ch.setopt(ch.SSL_VERIFYPEER, 0)
 				ch.setopt(ch.SSL_VERIFYHOST, 0)
 
-				# self.log.info("Writing to pipe %d" % (rfd))
+				self.log.info("Writing to pipe %d" % (rfd))
 				ch.perform()
 
 			except Exception, e:
@@ -308,15 +357,14 @@ class LAMAFS(FS):
 			  
 	def __init__(self, url = None, username = None, password = None):		
 
-		self.cfg= ConfigParser.ConfigParser()
+		self.log = logging.getLogger(self.__class__.__name__)
+		self.cfg = ConfigParser.ConfigParser()
 		if os.path.exists('/etc/agile/agile.conf'): self.cfg.read('/etc/agile/agile.conf')
 
 		url = 'https://api.lama.lldns.net'
 		username = self.cfg.get('Identity','username')
 		password = self.cfg.get('Identity','password')
 		self.egress_url = self.cfg.get('Egress','mapperurl')
-
-		self.log = logging.getLogger(self.__class__.__name__)
 		self.root_url = url
 		self.api_url = "%s/jsonrpc" % (self.root_url)
 
@@ -328,13 +376,12 @@ class LAMAFS(FS):
 		else:
 			tmp = urlp[1].split(":")
 			fqdn = tmp[0]
-			if len(tmp) > 1:
-				port = int(tmp[1])
-			else:
-				port = 8080
+			if len(tmp) > 1: port = int(tmp[1])
+			else: port = 8080
 			self.post_url = "http://%s:%d/post/file" % (fqdn, port)
 
-		self.log.info("api url %s, post url %s" % (self.api_url, self.post_url))
+		self.log.info("API URL: %s" % (self.api_url))
+		self.log.info("POST URL: %s" % (self.post_url))
 
 
 		# TODO: Support persisted tokens somewhere
@@ -349,8 +396,6 @@ class LAMAFS(FS):
 		self.api = AuthProxy(a, username, password, None, persisted_token, update_token_cb = self._update_token_cb )
 		self.api.noisy = False # DEBUG
 
-		self.log.info("Using API at %s" % (self.api_url))
-
 		self.cache_paths = {}
 		self.open_files = {}
 
@@ -358,13 +403,29 @@ class LAMAFS(FS):
 		if token == None:
 			self.log.warn("No token received after login")
 			return
-		self.log.debug("new token %s" % (repr(token)))
+		self.log.debug("Established new token (%s:%s)" % (self.username,repr(token)))
 		self.token = token
 		return token
 	   
 	#@FuncLog(None)
 	def getsize(self, path):
-		#item = self.__getNodeInfo( path )
+		cachepath = os.path.split(path)[0]
+		cache = self.cache_paths.get( cachepath )
+		if cache:
+			#self.log.debug("[%s] SCANNING CACHE (%s)\n" % (caller,cachepath))
+			found=None
+			if cache['path']==path:
+				found=cache ; otype = 0700 | stat.S_IFDIR
+			if not found:
+				for o in cache['files']:
+					if o['name']==os.path.split(path)[1]:
+						found=o ; otype = 0700 | stat.S_IFREG
+			if not found:
+				for o in cache['directories']:
+					if o['name']==os.path.split(path)[1]:
+						found=o ; otype = 0700 | stat.S_IFDIR
+			if found:
+				return found['size']
 		st = self.api.stat(path)
 		return st.get('size',0)
 
@@ -391,21 +452,27 @@ class LAMAFS(FS):
 			return fst
 
 		#node = self.__getNodeInfo(path, overrideCache = overrideCache)
-		cache = self.cache_paths.get( path )
-		self.log.debug("[%s] CACHE %s -> %s\n" % (caller,path,repr(cache)))
+		cachepath = path
+		cache = self.cache_paths.get( cachepath )
+		#self.log.debug("[%s] PASS 1 READ CACHE %s -> %s\n" % (caller,cachepath,repr(cache)))
 		if not cache:
-			cache = self.cache_paths.get( os.path.split(path)[0] )
-			self.log.debug("[%s] CACHE %s -> %s\n" % (caller,path,repr(cache)))
+			cachepath = os.path.split(path)[0]
+			cache = self.cache_paths.get( cachepath )
+			#self.log.debug("[%s] PASS 2 READ CACHE %s -> %s\n" % (caller,cachepath,repr(cache)))
 
-		if cache:
-			self.log.debug("[%s] CHECKING CACHE (%s)\n" % (caller,path))
+		if cache and not overrideCache:
+			#self.log.debug("[%s] SCANNING CACHE (%s)\n" % (caller,cachepath))
 			found=None
-			for o in cache['files']:
-				if o['name']==os.path.split(path)[1]:
-					found=o ; otype = 0700 | stat.S_IFREG
-			for o in cache['directories']:
-				if o['name']==os.path.split(path)[1]:
-					found=o ; otype = 0700 | stat.S_IFDIR
+			if cache['path']==path:
+				found=cache ; otype = 0700 | stat.S_IFDIR
+			if not found:
+				for o in cache['files']:
+					if o['name']==os.path.split(path)[1]:
+						found=o ; otype = 0700 | stat.S_IFREG
+			if not found:
+				for o in cache['directories']:
+					if o['name']==os.path.split(path)[1]:
+						found=o ; otype = 0700 | stat.S_IFDIR
 			if found:
 				node={}
 				node['size'] = found['size']
@@ -413,9 +480,12 @@ class LAMAFS(FS):
 				node['created_time'] = datetime.datetime.fromtimestamp(found['ctime'])
 				node['accessed_time'] = datetime.datetime.fromtimestamp(time.time())
 				node['st_mode'] = otype
+				#self.log.debug("[%s] FOUND (%s) IN CACHE (%s)\n" % (caller,path,cachepath))
 				return node
 
-		self.log.debug("[%s] NOT FROM CACHE (%s)\n" % (caller,path))
+			raise ResourceNotFoundError
+
+		self.log.debug("[%s] STAT (%s) - NOT FOUND IN CACHE (%s)\n" % (caller,path,cachepath))
 
 		st = self.api.stat(path)
 		if not st['code'] == 0:
@@ -424,7 +494,7 @@ class LAMAFS(FS):
 		node['size'] = st.get('size', 0)
 		node['modified_time'] = datetime.datetime.fromtimestamp(st['mtime'])
 		node['created_time'] = node['modified_time']
-		if st['type'] == FTYPE_DIR:
+		if st['type'] == FTYPE_DIRECTORY:
 		   node['st_mode'] = 0700 | stat.S_IFDIR
 		else:
 		   node['st_mode'] = 0700 | stat.S_IFREG
@@ -463,55 +533,42 @@ class LAMAFS(FS):
 	
 	#@FuncLog(None)
 	def isdir(self, path):
-		if path in ['/']:
-			return True
+		if path in ['/']: return True
+		cache = self.cache_paths.get( path )
+		if cache: return True
+		else: cache = self.cache_paths.get( os.path.split(path)[0] )
+		if cache:
+			for o in cache['directories']:
+				if o['name']==os.path.split(path)[1]: return True
+			return False
 		else:
-			cache = self.cache_paths.get( path )
-			if cache:
+			r = self.api.stat(path )
+			if r['code']  == -1: return False
+			if r['type'] == FTYPE_DIRECTORY: 
+				ret = self.listdir( path )
 				return True
-			else:
-				cache = self.cache_paths.get( os.path.split(path)[0] )
-				if cache:
-					for o in cache['directories']:
-						if o['name']==os.path.split(path)[1]:
-							return True
-					return False
-				else:
-					r = self.api.stat(path )
-					if r['code']  == -1: 
-						return False
-					if r['type'] == FTYPE_DIR:
-						return True
-					elif r['type'] == FTYPE_FILE:
-						return False
-					else:
-						return False
+			elif r['type'] == FTYPE_FILE: return False
+			else: return False
 
 	#@FuncLog(None)
 	def isfile(self, path):
-		if path in ['', '/']:
-			return False
+		if path in ['/']: return False
 
 		cache = self.cache_paths.get( path )
+		if cache: return False
+		else: cache = self.cache_paths.get( os.path.split(path)[0] )
 		if cache:
+			for o in cache['files']: 
+				if o['name']==os.path.split(path)[1]: return True
 			return False
 		else:
-			cache = self.cache_paths.get( os.path.split(path)[0] )
-			if cache:
-				for o in cache['files']:
-					if o['name']==os.path.split(path)[1]:
-						return True
+			r = self.api.stat(path)
+			if r['code']  == -1: return False
+			if r['type'] == FTYPE_FILE: return True
+			elif r['type'] == FTYPE_DIRECTORY: 
+				ret = self.listdir( path )
 				return False
-			else:
-				r = self.api.stat(path)
-				if r['code']  == -1: 
-					return False
-				if r['type'] == FTYPE_FILE:
-					return True
-				elif r['type'] == FTYPE_DIR:
-					return False
-				else:
-					return False
+			else: return False
 
 	#@FuncLog(None)
 	def makedir(self, path, recursive=False, allow_recreate=False):
@@ -563,49 +620,14 @@ class LAMAFS(FS):
 		return root, file
 		
 	#@FuncLog(None)
-	def __getNodeInfo(self, path, overrideCache = False):
-		# check if file exists in cached data or fecth target dir
-		(root, file) = self.__getBasePath( path )
-		if root in ['']: root='/'
-
-		caller = sys._getframe(1).f_code.co_name
-		cache = self.cache_paths.get( root )
-		self.log.debug("[%s] READ CACHE (%s) -> %s\n" % (caller, root, repr(cache)))
-
-		# check if in cache
-		item = None
-		if cache and not overrideCache:
-			for o in cache['files']:
-				self.log.debug("[%s] check if item %s=%s\n" % (caller, o['name'], file))
-				if o['name']==file: item=o
-		else:
-			# fetch listdir in cache then restart
-			res = self.listdir( path )
-			self.log.debug("[%s] fetch listdir in cache restart %s\n" % (caller, repr(res)))
-			if res:
-				item = self.__getNodeInfo( root )
-		return item
-			
-	#@FuncLog(None)
 	def close(self):
 		self.log.info("closing down")
+		self.log.debug("%s" % (repr(self.cache_paths.items())))
 		return True
 
 	#@FuncLog(None)
-	def listdir(self, path="./",
-					  wildcard=None,
-					  full=False,
-					  absolute=False,
-					  dirs_only=False,
-					  files_only=False,
-					  overrideCache=False
-					  ):
-		djson=[]
-		fjson=[]
-		df=[]
-		d=[]
-		f=[]
-		list = []
+	def listdir(self, path="./", wildcard=None, full=False, absolute=False, dirs_only=False, files_only=False, overrideCache=False):
+		djson=[] ; fjson=[] ; df=[] ; d=[] ; f=[] ; list = []
 
 		if not path.startswith('/'):
 			path=u'/%s' % path
@@ -615,7 +637,7 @@ class LAMAFS(FS):
 
 		cache = self.cache_paths.get( cachedir )
 		caller = sys._getframe(1).f_code.co_name
-		self.log.debug("[%s] CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
+		# self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
 
 		if cache and not overrideCache:
 			if not files_only:
@@ -624,8 +646,10 @@ class LAMAFS(FS):
 				f=[o['name'] for o in cache['files']] ; list.extend(f)
 
 		else:
-			djson = self.api.listDir( path, 1000, 0, True )
-			fjson = self.api.listFile( path, 1000, 0, True )
+
+			st = self.api.stat(path)
+			djson = self.api.listDir( path, 10000, 0, True )
+			fjson = self.api.listFile( path, 10000, 0, True )
 
 			if not files_only: 
 				d=[f['name'] for f in djson['list']] ; list.extend(d)
@@ -633,7 +657,8 @@ class LAMAFS(FS):
 			if not dirs_only:  
 				f=[f['name'] for f in fjson['list']] ; list.extend(f)
 
-			jsonstr = '''{ "path": "'''+path+'''", "files": [ '''
+			jsonstr = '''{ "path": "'''+path+'''", "size": '''+str(st.get('size', 0))+''', "ctime": '''+str(st['ctime'])+''', "mtime": '''+str(st['mtime'])+''', '''
+			jsonstr = jsonstr + '''"files": [ '''
 			for object in fjson['list']: 
 				jsonstr = jsonstr + '''{ "name": "'''+object['name']+'''", "ctime": '''+str(object['stat']['ctime'])+''', "mtime": '''+str(object['stat']['mtime'])+''', "size": '''+str(object['stat']['size'])+''' },'''
 			jsonstr = jsonstr[0:len(jsonstr)-1]
@@ -650,20 +675,8 @@ class LAMAFS(FS):
 		return self._listdir_helper(path, list, wildcard, full, absolute, dirs_only, files_only)
 
 	#@FuncLog(None)
-	def listdirinfo(self, path="./",
-					  wildcard=None,
-					  full=False,
-					  absolute=False,
-					  dirs_only=False,
-					  files_only=False,
-					  overrideCache=False
-					  ):
-		djson=[]
-		fjson=[]
-		df=[]
-		d=[]
-		f=[]
-		list = []
+	def listdirinfo(self, path="./", wildcard=None, full=False, absolute=False, dirs_only=False, files_only=False, overrideCache=False):
+		djson=[] ; fjson=[] ; df=[] ; d=[] ; f=[] ; list = []
 
 		if not path.startswith('/'):
 			path=u'/%s' % path
@@ -673,7 +686,7 @@ class LAMAFS(FS):
 
 		cache = self.cache_paths.get( cachedir )
 		caller = sys._getframe(1).f_code.co_name
-		self.log.debug("[%s] CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
+		# self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
 
 		if cache and not overrideCache:
 			if not files_only:
@@ -699,34 +712,36 @@ class LAMAFS(FS):
 					list.append((o['name'],st))
 
 		else:
-			djson = self.api.listDir( path, 1000, 0, True)
-			fjson = self.api.listFile( path, 1000, 0, True )
+			st = self.api.stat(path)
+			djson = self.api.listDir( path, 10000, 0, True)
+			fjson = self.api.listFile( path, 10000, 0, True )
 
 			if not files_only:
 				for f in djson['list']:
 				   s = f['stat']
-				   st = {
+				   fst = {
 					  'size' : s['size'],
 					  'created_time' : datetime.datetime.fromtimestamp(s['mtime']),
 					  'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
 					  'modified_time' : datetime.datetime.fromtimestamp(s['mtime']),
 					  'st_mode' : 0700 | stat.S_IFDIR
 				   }
-				   list.append((f['name'], st))
+				   list.append((f['name'], fst))
 
 			if not dirs_only: 
 				for f in fjson['list']:
 				   s = f['stat']
-				   st = {
+				   fst = {
 					  'size' : s['size'],
 					  'created_time' : datetime.datetime.fromtimestamp(s['mtime']),
 					  'accessed_time' : datetime.datetime.fromtimestamp(time.time()),
 					  'modified_time' : datetime.datetime.fromtimestamp(s['mtime']),
 					  'st_mode' : 0700 | stat.S_IFREG
 				   }
-				   list.append((f['name'], st))
+				   list.append((f['name'], fst))
 
-			jsonstr = '''{ "path": "'''+path+'''", "files": [ '''
+			jsonstr = '''{ "path": "'''+path+'''", "size": '''+str(st.get('size', 0))+''', "ctime": '''+str(st['ctime'])+''', "mtime": '''+str(st['mtime'])+''', '''
+			jsonstr = jsonstr + '''"files": [ '''
 			for object in fjson['list']: 
 				jsonstr = jsonstr + '''{ "name": "'''+object['name']+'''", "ctime": '''+str(object['stat']['ctime'])+''', "mtime": '''+str(object['stat']['mtime'])+''', "size": '''+str(object['stat']['size'])+''' },'''
 			jsonstr = jsonstr[0:len(jsonstr)-1]
@@ -743,74 +758,4 @@ class LAMAFS(FS):
 
 		#return self._listdir_helper(path, list, wildcard, full, absolute, dirs_only, files_only)
 		return list
-
-class AuthProxy(object):
-	"""
-	Provides a Debug proxy class that logs requests and responses
-
-	"""
-	noisy = True
-
-	def __init__(self, api, user = None, password = None, name = None, token = None, update_token_cb = None):
-		self.log = logging.getLogger(self.__class__.__name__)
-		self.api = api
-		self.user = user
-		self.password = password
-		self.name = name
-		self.token = token
-		self.user_object = None
-
-		if update_token_cb == None:
-			update_token_cb = lambda token: token
-		self.update_token_cb = update_token_cb
-
-		if name == None and token:
-			self.update_token_cb(token)
-
-	def __getattr__(self, name):
-		if not self.token:
-			self._login()
-		return AuthProxy(self.api, self.user, self.password, name, self.token, self.update_token_cb)
-
-	def _get_token(self):
-		return self.token
-
-	def _login(self):
-		"""
-		login if the token is not set
-		"""
-		if self.token:
-			self.log.debug("already logged in with token %s" % (self.token))
-			return False
-		self.log.debug("Logging in with %s xxx" % (repr(self.user)))
-		token, user_object = self.api.login(self.user, self.password)
-		self.token = token
-		self.update_token_cb(token)
-		self.user_object = user_object
-		self.log.debug("login token %s" % (self.token))
-		return True
-
-	def __call__(self, *args):
-		#auth = request_authorization(self.name, self.key, self.secret)
-		newargs = [ self.token ] + list(args)
-		method = getattr(self.api, self.name)
-		ret = None
-
-		# self.log.debug("%s %s" % (method, newargs))
-
-		try:
-			ret = method(*newargs)
-
-		except JSONRPCException, e:
-			if hasattr(e, 'error'):
-				self.log.error("%s: %s" % (self.name, e.error))
-			raise e
-
-		if self.noisy:
-			frame = 1
-			caller = sys._getframe(frame).f_code.co_name
-			self.log.debug("[%s] %s%s -> %s" % (caller, self.name, repr(args), repr(ret)))
-
-		return ret
-
 
