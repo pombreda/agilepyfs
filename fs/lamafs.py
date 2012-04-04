@@ -607,6 +607,7 @@ class LAMAFS(FS):
 			raise ResourceInvalidError(path)
 		
 		r = self.api.deleteFile( path )
+		if r==0: self.cache_paths[os.path.split(path)[0]] = None
 		return (r == 0)
 		
 	#@FuncLog(None)
