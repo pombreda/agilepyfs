@@ -11,12 +11,12 @@ platform = platform.system()
 class FSMount(Command):
     
     if platform == "Windows":
-        usage = """agilemount [OPTIONS]... [FS] [DRIVE LETTER]
-or agilemount -u [DRIVER LETTER]
+        usage = """lamamount [OPTIONS]... [FS] [DRIVE LETTER]
+or lamamount -u [DRIVER LETTER]
 Mounts a filesystem on a drive letter"""
     else:
-        usage = """agilemount [OPTIONS]... [FS] [SYSTEM PATH]
-or agilemount -u [SYSTEM PATH]
+        usage = """lamamount [OPTIONS]... [FS] [SYSTEM PATH]
+or lamamount -u [SYSTEM PATH]
 Mounts a file system on a system path"""
 
     version = "1.0"

@@ -20,6 +20,7 @@ COMMANDS = ['fscat',
             'fstree',
             'fsmkdir',
             'fsmount',
+            'lamamount',
             'agilemount']
 
 

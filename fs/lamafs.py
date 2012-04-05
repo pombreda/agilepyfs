@@ -2,7 +2,7 @@
 pyfilesystem module for agile
 
 """
-DEBUG = False
+DEBUG = True
 
 import os, sys, stat, logging
 import urlparse, urllib
@@ -18,12 +18,14 @@ import json
 from fs.base import *
 from fs.path import *
 from fs.errors import *
+import fs.errors as errors
 from fs.remote import *
 from fs.filelike import LimitBytesFile
 
+import urllib2
+
 	
-FTYPE_DIRECTORY = 1
-FTYPE_FILE = 2
+FTYPE_DIRECTORY = 1 ; FTYPE_FILE = 2
 
 if DEBUG:
 	logger = logging.getLogger()
@@ -55,6 +57,46 @@ def FuncLog(name):
 		return wrapper2
 	return wrapper
 
+class Connection:
+	def __init__(self, mapperurl):
+		self.log = logging.getLogger(self.__class__.__name__)
+		self.mapperurl = mapperurl 
+		self.headers = {'Accept': 'text/plain'}
+		self.log.debug( "%s" % (mapperurl))
+
+	#@FuncLog(None)
+	def _urlopen(self, req):
+		self.log.debug("_urlopen %s: %s" % ( repr(req), repr(req.get_full_url()) ) )
+		try:
+			return urllib2.urlopen(req)
+		except Exception, e:
+			if not getattr(e, 'getcode', None):
+				raise errors.RemoteConnectionError(str(e))
+			code = e.getcode()
+			if code == 500:
+				raise errors.StorageSpaceError(e.fp.read())
+			elif code in (400, 404, 410):
+				raise errors.ResourceNotFoundError(e.fp.read())
+			raise errors.ResourceInvalidError(e.fp.read())
+
+	#@FuncLog(None)
+	def get(self, path, data={}, offset=None, length=None):
+		url = self.mapperurl+urllib2.quote(path)
+		url = url.replace("//","/")
+		url = url.replace(":/","://")
+		self.log.debug("url =%s" % (url))
+		self.log.debug("(get) url, path, data, offset, length = %s, %s, %s, %s, %s" % (url, path, repr(data), str(offset), str(length) ) )
+		self.log.debug("if data")
+		if data:
+			self.log.debug("u? join")
+			path = u'?'.join([path, data])
+
+		req = urllib2.Request(url)
+		if offset:
+			if length: req.headers['Range'] = 'bytes=%d-%d' % (int(offset), int(offset+length))
+			else: req.headers['Range'] = 'bytes=%d-' % int(offset)
+
+		return self._urlopen(req)
 
 class AuthProxy(object):
 	"""
@@ -124,54 +166,6 @@ class AuthProxy(object):
 		return ret
 
 
-class _LAMAFSFile(object):
-
-	""" A file-like that provides access to a file with Agile CLU API """
-
-	def __init__(self, agilefs, path, mode = 'r'):
-		if not path.startswith('/'): path = u'/%s' % path
-		self.agilefs = agilefs
-		self.path = path
-		self.mode = mode
-		self.closed = False
-		self.file_size = 0
-		#if 'r' in mode or 'a' in mode:
-		 #   self.file_size = dropboxfs.getsize(path)
-		 
-	#@FuncLog(None)
-	def getCacheDir(self, dir = False):
-		if dir:
-			return self.path
-		root = os.path.split(self.path)[0]
-		if root == '':
-			root = '/'
-		return root
-		
-	#@FuncLog(None)
-	def getFullPath(self):
-		return self.dropboxfs.getDropBoxFullPath( self.path )
-
-	#@FuncLog(None)
-	def read(self):
-		# read file; might be funky on resp.read() vs agilefs.read is a buffer
-		if self.agilefs.fexists(self.path):
-			resp = self.agilefs.read( path=self.path )
-			return resp.read()
-		else:
-			return False
-		
-	#@FuncLog(None)
-	def write(self, data):
-		# write to dropbox
-		# cfile = myStringIO(self.path, data)
-		# resp = self.agilefs.dropBoxCommand('put_file', path = self.path, data = cfile)
-		# self.agilefs.refreshDirCache( os.path.split(self.path)[0] )
-		return (resp.status == 200)
-
-	#@FuncLog(None)
-	def close(self):
-		self.closed = True		
-
 class LAMAFile(object):
 
 	noisy = True
@@ -179,7 +173,7 @@ class LAMAFile(object):
 	def __init__(self, fs, path, mode):
 		self.log = logging.getLogger(self.__class__.__name__)
 		self.fs = fs
-		self.egress_url = fs.egress_url
+		self.mapperurl = fs.mapperurl
 		self.api = fs.api
 		self._api = fs._api
 		self.path = normpath(path)
@@ -211,66 +205,6 @@ class LAMAFile(object):
 		else: name = None
 		return "<%s %s mode=%s localfile=%s>" % (self.__class__.__name__, self.path, self.mode, name)
 
-	def _start_upload(self, src, dst):
-		directory = os.path.dirname(normpath('/'+dst))
-		basename = os.path.basename(normpath('/'+dst))
-
-		api = self.fs.api
-		post_url = self.fs.post_url
-		rfd, wfd = os.pipe()
-		pid = os.fork()
-
-		self.log.debug("pipe read %d, write %d" % (rfd, wfd))
-
-		if pid == 0:
-			self.log.info("Stared upload %s to %s, reading from %d" % (src, post_url, rfd))
-
-			try:
-				fp = os.fdopen(rfd)
-				datagen, request_headers = multipart_encode(dict([
-				   ('uploadFile', fp),
-				   ('directory', directory),
-				   ('basename', basename)
-				]))
-				os.close(wfd)
-				ch = pycurl.Curl()
-				ch.setopt(ch.POST, 1)
-				response_headers = []
-				headers = []
-				headers.append("X-LLNW-Authorization: %s" % (str(api.token)))
-				for k, v in request_headers.iteritems():
-					headers.append("%s: %s" % (k, v))
-				ch.setopt(ch.FORBID_REUSE, 1)
-				if self.noisy:
-					#ch.setopt(ch.VERBOSE, 1)
-					pass
-				ch.setopt(ch.HTTPHEADER, headers)
-				ch.setopt(ch.READFUNCTION, FileReader(datagen))
-				ch.setopt(ch.HEADERFUNCTION, response_headers.append)
-				ch.setopt(ch.URL, post_url)
-
-				self.log.info("directory %s, basename %s" % (directory, basename))
-
-				ch.setopt(ch.SSL_VERIFYPEER, 0)
-				ch.setopt(ch.SSL_VERIFYHOST, 0)
-
-				self.log.info("Writing to pipe %d" % (rfd))
-				ch.perform()
-
-			except Exception, e:
-				traceback.print_exc()
-				self.log.error("%s" % (e))
-
-			# self.log.debug("close %d" % (rfd))
-			os.close(rfd)
-			#sys.exit(0)
-			# self.log.debug("finished")
-			
-		else:
-			# self.log.info("upload child pid %s" % (pid))
-			os.close(rfd)
-			return wfd
-
 	#@FuncLog(None)
 	def setcontents(self, path, contents, chunk_size=64*1024):
 		contents.seek(0)
@@ -293,9 +227,9 @@ class LAMAFile(object):
 
 		# Read from mapper
 		if not hasattr(self, 'urlf'):
-			egress_url = "%s%s" % (self.egress_url, self.path)
-			# self.log.info("Egress URL %s" % (egress_url))
-			urlf = urllib.urlopen(egress_url)
+			mapperurl = "%s%s" % (self.mapperurl, self.path)
+			# self.log.info("Egress URL %s" % (mapperurl))
+			urlf = urllib.urlopen(mapperurl)
 			self.urlf = urlf
 
 		return self.urlf.read(n)
@@ -357,6 +291,7 @@ class LAMAFS(FS):
 			  
 	def __init__(self, url = None, username = None, password = None):		
 
+		self.path = '/'
 		self.log = logging.getLogger(self.__class__.__name__)
 		self.cfg = ConfigParser.ConfigParser()
 		if os.path.exists('/etc/agile/agile.conf'): self.cfg.read('/etc/agile/agile.conf')
@@ -364,9 +299,12 @@ class LAMAFS(FS):
 		url = 'https://api.lama.lldns.net'
 		username = self.cfg.get('Identity','username')
 		password = self.cfg.get('Identity','password')
-		self.egress_url = self.cfg.get('Egress','mapperurl')
+		self.mapperurl = self.cfg.get('Egress','mapperurl')
 		self.root_url = url
 		self.api_url = "%s/jsonrpc" % (self.root_url)
+
+		self.connection = Connection(self.mapperurl)
+		self.log.debug( "%s" % (self.mapperurl) )
 
 		secure_upload = False
 
@@ -407,6 +345,17 @@ class LAMAFS(FS):
 		self.token = token
 		return token
 	   
+	#@FuncLog(None)
+	def getpathurl(self, path, allow_none=False, mapperurl=None):
+		if mapperurl == None: mapperurl = self.connection.mapperurl
+		self.log.debug("Retrieving URL for %s over %s" % ( path, mapperurl ))
+		return u"%s/%path" % (mapperurl, path)
+
+	#@FuncLog(None)
+	def getrange(self, path, offset, length=None):
+		self.log.debug('connection.get path %s, offset %s, length %s' % (path,offset,length))
+		return self.connection.get(u'/%s' % (path), offset=offset, length=length)
+
 	#@FuncLog(None)
 	def getsize(self, path):
 		cachepath = os.path.split(path)[0]
@@ -494,14 +443,41 @@ class LAMAFS(FS):
 		node['size'] = st.get('size', 0)
 		node['modified_time'] = datetime.datetime.fromtimestamp(st['mtime'])
 		node['created_time'] = node['modified_time']
-		if st['type'] == FTYPE_DIRECTORY:
-		   node['st_mode'] = 0700 | stat.S_IFDIR
-		else:
-		   node['st_mode'] = 0700 | stat.S_IFREG
+		if st['type'] == FTYPE_DIRECTORY: node['st_mode'] = 0700 | stat.S_IFDIR
+		else: node['st_mode'] = 0700 | stat.S_IFREG
 		return node
 		
 	#@FuncLog(None)
-	def open(self, path, mode="r"):
+	def open(self, path, mode='r', **kwargs):
+		self.log.debug('Opening file %s in mode %s' % (path, mode))
+		newfile = False
+		if not self.exists(path):
+			if 'w' in mode or 'a' in mode:
+				newfile = True
+			else:
+				self.log.debug("File %s not found while opening for reads" % path)
+				raise errors.ResourceNotFoundError(path)
+		elif self.isdir(path):
+			self.log.debug("Path %s is directory, not a file" % path)
+			raise errors.ResourceInvalidError(path)
+		elif 'w' in mode:
+			newfile = True
+
+		if newfile:
+			self.log.debug('Creating empty file %s' % path)
+			if self.getmeta("read_only"):
+				raise errors.UnsupportedError('read only filesystem')
+			self.setcontents(path, '')
+			handler = NullFile()
+		else:
+			self.log.debug('Opening existing file %s for reading' % path)
+			handler = self.getrange(path,0)
+
+		return RemoteFileBuffer(self, path, mode, handler, write_on_flush=False)
+
+
+	#@FuncLog(None)
+	def oldopen(self, path, mode="r", **kwargs):
 
 		path = normpath(path)
 		mode = mode.lower()		
@@ -627,15 +603,20 @@ class LAMAFS(FS):
 		return True
 
 	#@FuncLog(None)
+	def getCacheDir(self, dir = False):
+		if dir: return self.path
+		root = os.path.split(self.path)[0]
+		if root == '': root = '/'
+		return root
+
+	#@FuncLog(None)
 	def listdir(self, path="./", wildcard=None, full=False, absolute=False, dirs_only=False, files_only=False, overrideCache=False):
 		djson=[] ; fjson=[] ; df=[] ; d=[] ; f=[] ; list = []
 
 		if not path.startswith('/'):
 			path=u'/%s' % path
 
-		f = _LAMAFSFile( self, path )
-		cachedir = f.getCacheDir(dir=True)
-
+		cachedir = path
 		cache = self.cache_paths.get( cachedir )
 		caller = sys._getframe(1).f_code.co_name
 		# self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
@@ -682,9 +663,7 @@ class LAMAFS(FS):
 		if not path.startswith('/'):
 			path=u'/%s' % path
 
-		f = _LAMAFSFile( self, path )
-		cachedir = f.getCacheDir(dir=True)
-
+		cachedir = path
 		cache = self.cache_paths.get( cachedir )
 		caller = sys._getframe(1).f_code.co_name
 		# self.log.debug("[%s] READ CACHE %s -> %s\n" % (caller, cachedir, repr(cache)))
